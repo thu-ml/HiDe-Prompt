@@ -1,0 +1,10 @@
+timm==0.6.7
+pillow==9.2.0
+matplotlib==3.5.3
+torchprofile==0.0.4
+torch==1.13.1
+torchvision==0.14.1
+urllib3==2.0.3
+scipy==1.7.3
+scikit-learn==1.0.2
+numpy==1.21.6
