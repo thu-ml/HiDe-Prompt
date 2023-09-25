@@ -39,7 +39,6 @@ python -m torch.distributed.launch \
 	--prompt_momentum 0.01 \
 	--reg 0.01 \
 	--length 20 \
-	--larger_prompt_lr \
 	--trained_original_model ./output/cub_ibot21k_multi_centroid_mlp_2_seed$seed \
 	--output_dir ./output/cub_ibot21k_pe_seed42
 done

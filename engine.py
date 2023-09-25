@@ -388,14 +388,13 @@ def _compute_mean(model: torch.nn.Module, data_loader: Iterable, device: torch.d
             features_per_cls = torch.cat(features_per_cls_list, dim=0)
             # print(features_per_cls.shape)
             cls_mean[cls_id] = features_per_cls.mean(dim=0)
-            cls_cov[cls_id] = torch.diag(torch.cov(features_per_cls.T) + (torch.eye(cls_mean[cls_id].shape[-1]) * 1e-4).to(device))
+            cls_cov[cls_id] = torch.cov(features_per_cls.T) + (torch.eye(cls_mean[cls_id].shape[-1]) * 1e-4).to(device)
         
         if args.ca_storage_efficient_method == 'variance':
             features_per_cls = torch.cat(features_per_cls_list, dim=0)
             # print(features_per_cls.shape)
             cls_mean[cls_id] = features_per_cls.mean(dim=0)
-            cls_cov[cls_id] = torch.cov(features_per_cls.T) + (torch.eye(cls_mean[cls_id].shape[-1]) * 1e-4).to(device)
-        
+            cls_cov[cls_id] = torch.diag(torch.cov(features_per_cls.T) + (torch.eye(cls_mean[cls_id].shape[-1]) * 1e-4).to(device))
         if args.ca_storage_efficient_method == 'multi-centroid':
             from sklearn.cluster import KMeans
             n_clusters = args.n_centroids
@@ -433,11 +432,12 @@ def train_classifier_alignment(model: torch.nn.Module, args, device, class_mask=
     for i in range(task_id):
         crct_num += len(class_mask[i])
 
+    # TODO: efficiency may be improved by encapsulating sampled data into Datasets class and using distributed sampler.
     for epoch in range(run_epochs):
 
         sampled_data = []
         sampled_label = []
-        num_sampled_pcls = args.batch_size
+        num_sampled_pcls = args.batch_size * 5
 
         metric_logger = utils.MetricLogger(delimiter="  ")
         metric_logger.add_meter('Lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -448,6 +448,8 @@ def train_classifier_alignment(model: torch.nn.Module, args, device, class_mask=
                 for c_id in class_mask[i]:
                     mean = torch.tensor(cls_mean[c_id], dtype=torch.float64).to(device)
                     cov = cls_cov[c_id].to(device)
+                    if args.ca_storage_efficient_method == 'variance':
+                        cov = torch.diag(cov)
                     m = MultivariateNormal(mean.float(), cov.float())
                     sampled_data_single = m.sample(sample_shape=(num_sampled_pcls,))
                     sampled_data.append(sampled_data_single)

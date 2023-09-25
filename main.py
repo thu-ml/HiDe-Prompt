@@ -172,15 +172,8 @@ if __name__ == '__main__':
 
     subparser = parser.add_subparsers(dest='subparser_name')
 
-    if config == 'cifar100_dualprompt':
-        from configs.cifar100_dualprompt import get_args_parser
-        config_parser = subparser.add_parser('cifar100_dualprompt', help='Split-CIFAR100 DualPrompt configs')
-    elif config == 'imr_dualprompt':
-        from configs.imr_dualprompt import get_args_parser
-        config_parser = subparser.add_parser('imr_dualprompt', help='Split-ImageNet-R DualPrompt configs')
-    elif config == 'cifar100_hideprompt_5e':
+    if config == 'cifar100_hideprompt_5e':
         from configs.cifar100_hideprompt_5e import get_args_parser
-
         config_parser = subparser.add_parser('cifar100_hideprompt_5e', help='Split-CIFAR100 SPrompt configs')
     elif config == 'imr_hideprompt_5e':
         from configs.imr_hideprompt_5e import get_args_parser

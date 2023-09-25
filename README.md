@@ -1,8 +1,6 @@
 # HiDe-Prompt
 The official implementation of HiDe-Prompt. 
 
-This repository is modified from PyTorch implementation of [Dual-Prompt](https://github.com/JH-LEE-KR/dualprompt-pytorch). 
-
 ## Requirements
 - Python 3.6+  
 ```pip install -r requirements.txt```
@@ -28,6 +26,8 @@ Please download the self-supervised checkpoints and put them in the /checkpoints
 ## Usage
 To reproduce the results mentioned in our paper, execute the training script in /training_script/{train_{dataset}_{backbone}.sh}.
 
-Our code also supports reproducing the original DualPrompt experiments by modifying the hyper-parameters in the /config/{dataset}_dualprompt.py file.
-
 If you encounter any issues or have any questions, please let us know. 
+
+## Acknowledgement
+This repository is developed based on the PyTorch implementation of [Dual-Prompt](https://github.com/JH-LEE-KR/dualprompt-pytorch). 
+
