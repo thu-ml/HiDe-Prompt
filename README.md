@@ -6,11 +6,11 @@ The official implementation of HiDe-Prompt.
 ```pip install -r requirements.txt```
 
 ## Experimental Setup
-Our code has been tested on four datasets: CIFAR-100, ImageNetR, 5-datasets, and CUB200:
+Our code has been tested on four datasets: CIFAR-100, ImageNetR, 5-Datasets, and CUB-200:
 ### dataset
 - [CIFAR100](https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz)
 - [Imagenet-R](https://people.eecs.berkeley.edu/~hendrycks/imagenet-r.tar)
-- 5-datasets (including SVHN, MNIST, CIFAR10, NotMNIST, FashionMNIST)
+- 5-Datasets (including SVHN, MNIST, CIFAR10, NotMNIST, FashionMNIST)
 - [CUB200](https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz)
 
 ### supervised and self-supervised checkpoints
