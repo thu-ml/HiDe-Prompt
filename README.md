@@ -35,6 +35,7 @@ This repository is developed based on the PyTorch implementation of [Dual-Prompt
 
 If you find this code helpful to your work, please cite our paper:
 
+```bibtex
 @article{wang2023hide,
   title={Hierarchical Decomposition of Prompt-Based Continual Learning: Rethinking Obscured Sub-optimality},
   author={Wang, Liyuan and Xie, Jingyi and Zhang, Xingxing and Huang, Mingyi and Su, Hang and Zhu, Jun},
