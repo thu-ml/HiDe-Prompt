@@ -1,5 +1,5 @@
 # HiDe-Prompt
-The official implementation of HiDe-Prompt. 
+The official implementation of HiDe-Prompt (NeurIPS 2023, Spotlight).
 
 ## Requirements
 - Python 3.6+  
