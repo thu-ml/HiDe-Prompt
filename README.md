@@ -6,12 +6,12 @@ The official implementation of HiDe-Prompt (NeurIPS 2023, Spotlight).
 ```pip install -r requirements.txt```
 
 ## Experimental Setup
-Our code has been tested on four datasets: CIFAR-100, ImageNetR, 5-Datasets, and CUB-200:
+Our code has been tested on four datasets: CIFAR-100, ImageNet-R, 5-Datasets, and CUB-200:
 ### Dataset
-- [CIFAR100](https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz)
+- [CIFAR-100](https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz)
 - [Imagenet-R](https://people.eecs.berkeley.edu/~hendrycks/imagenet-r.tar)
 - 5-Datasets (including SVHN, MNIST, CIFAR10, NotMNIST, FashionMNIST)
-- [CUB200](https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz)
+- [CUB-200](https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz)
 
 ### Supervised and Self-supervised Checkpoints
 and incorporated the following supervised and self-supervised checkpoints as backbones:
