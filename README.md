@@ -14,7 +14,7 @@ Our code has been tested on four datasets: CIFAR-100, ImageNet-R, 5-Datasets, an
 - [CUB-200](https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz)
 
 ### Supervised and Self-supervised Checkpoints
-and incorporated the following supervised and self-supervised checkpoints as backbones:
+We incorporated the following supervised and self-supervised checkpoints as backbones:
 - [Sup-21K VIT](https://storage.googleapis.com/vit_models/imagenet21k/ViT-B_16.npz)
 - [iBOT-21K](https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/archive/2022/ibot/vitb_16_pt22k/checkpoint.pth)
 - [iBOT](https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/archive/2022/ibot/vitb_16/checkpoint_teacher.pth)
