@@ -110,7 +110,7 @@ def get_args_parser(subparsers):
     # Prompt parameters
     subparsers.add_argument('--prompt_pool', default=True, type=bool, )
     subparsers.add_argument('--size', default=5, type=int, )
-    subparsers.add_argument('--length', default=20, type=int, )
+    subparsers.add_argument('--length', default=40, type=int, )
     subparsers.add_argument('--top_k', default=1, type=int, )
     subparsers.add_argument('--initializer', default='uniform', type=str, )
     subparsers.add_argument('--prompt_key', default=True, type=bool, )

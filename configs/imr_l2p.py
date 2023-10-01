@@ -101,7 +101,7 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--embedding_key', default='cls', type=str)
     subparsers.add_argument('--predefined_key', default='', type=str)
     subparsers.add_argument('--pull_constraint', default=True)
-    subparsers.add_argument('--pull_constraint_coeff', default=1.0, type=float)
+    subparsers.add_argument('--pull_constraint_coeff', default=0.1, type=float)
     subparsers.add_argument('--same_key_value', default=False, type=bool)
 
     # ViT parameters
