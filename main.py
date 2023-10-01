@@ -15,8 +15,7 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 
 from datasets import build_continual_dataloader
-from engine import *
-import vision_transformer
+
 import utils
 import tii_trainer
 import warnings
@@ -26,7 +25,6 @@ warnings.filterwarnings('ignore', 'Argument interpolation should be of type Inte
 
 def main(args):
     utils.init_distributed_mode(args)
-
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -40,16 +38,37 @@ def main(args):
     data_loader, data_loader_per_cls, class_mask, target_task_map = build_continual_dataloader(args)
     print(f"debug: {target_task_map}")
 
+    if 'hide' in args.config:
+        from engines.hide_wtp_and_tap_engine import train_and_evaluate, evaluate_till_now
+        import vits.hide_vision_transformer as hide_vision_transformer
+    elif 'dualprompt' in args.config or 'l2p' in args.config or 'sprompt' in args.config:
+        from engines.dp_engine import train_and_evaluate, evaluate_till_now
+        import vits.dp_vision_transformer as dp_vision_transformer
+    else:
+        raise NotImplementedError
+
     print(f"Creating original model: {args.original_model}")
-    original_model = create_model(
-        args.original_model,
-        pretrained=args.pretrained,
-        num_classes=args.nb_classes,
-        drop_rate=args.drop,
-        drop_path_rate=args.drop_path,
-        drop_block_rate=None,
-        mlp_structure=args.original_model_mlp_structure,
-    )
+    if 'hide' in args.config:
+        original_model = create_model(
+            args.original_model,
+            pretrained=args.pretrained,
+            num_classes=args.nb_classes,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            drop_block_rate=None,
+            mlp_structure=args.original_model_mlp_structure,
+        )
+    elif 'dualprompt' in args.config or 'l2p' in args.config or 'sprompt' in args.config:
+        original_model = create_model(
+            args.original_model,
+            pretrained=args.pretrained,
+            num_classes=args.nb_classes,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            drop_block_rate=None,
+        )
+    else:
+        raise NotImplementedError
 
     print(f"Creating model: {args.model}")
     model = create_model(
@@ -83,16 +102,17 @@ def main(args):
     model.to(device)
 
     if args.freeze:
-        # all parameters are frozen for original vit model
-        for p in original_model.parameters():
-            p.requires_grad = False
-
+        # all backbobe parameters are frozen for original vit model
+        for n, p in original_model.named_parameters():
+            if n.startswith(tuple(args.freeze)):
+                p.requires_grad = False
         # freeze args.freeze[blocks, patch_embed, cls_token] parameters
         for n, p in model.named_parameters():
             if n.startswith(tuple(args.freeze)):
                 p.requires_grad = False
 
     print(args)
+
 
     if args.eval:
         acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
@@ -136,7 +156,7 @@ def main(args):
 
 
     # This is a simple yet effective trick that helps to learn task-specific prompt better.
-    if args.larger_prompt_lr:
+    if 'hide' in args.config and args.larger_prompt_lr:
         base_params = [p for name, p in model_without_ddp.named_parameters() if 'prompt' in name and p.requires_grad == True]
         base_fc_params = [p for name, p in model_without_ddp.named_parameters() if 'prompt' not in name and p.requires_grad == True]
         base_params = {'params': base_params, 'lr': args.lr, 'weight_decay': args.weight_decay}
@@ -174,16 +194,52 @@ if __name__ == '__main__':
 
     if config == 'cifar100_hideprompt_5e':
         from configs.cifar100_hideprompt_5e import get_args_parser
-        config_parser = subparser.add_parser('cifar100_hideprompt_5e', help='Split-CIFAR100 SPrompt configs')
+        config_parser = subparser.add_parser('cifar100_hideprompt_5e', help='Split-CIFAR100 HiDe-Prompt configs')
     elif config == 'imr_hideprompt_5e':
         from configs.imr_hideprompt_5e import get_args_parser
-        config_parser = subparser.add_parser('imr_hideprompt_5e', help='Split-ImageNet-R SPrompt configs')
+        config_parser = subparser.add_parser('imr_hideprompt_5e', help='Split-ImageNet-R HiDe-Prompt configs')
     elif config == 'five_datasets_hideprompt_5e':
         from configs.five_datasets_hideprompt_5e import get_args_parser
-        config_parser = subparser.add_parser('five_datasets_hideprompt_5e', help='five datasets configs')
+        config_parser = subparser.add_parser('five_datasets_hideprompt_5e', help='five datasets HiDe-Prompt configs')
     elif config == 'cub_hideprompt_5e':
         from configs.cub_hideprompt_5e import get_args_parser
-        config_parser = subparser.add_parser('cub_hideprompt_5e', help='cub sprompt configs')
+        config_parser = subparser.add_parser('cub_hideprompt_5e', help='Split-CUB HiDe-Prompt configs')
+    elif config == 'cifar100_dualprompt':
+        from configs.cifar100_dualprompt import get_args_parser
+        config_parser = subparser.add_parser('cifar100_dualprompt', help='Split-CIFAR100 dual-prompt configs')
+    elif config == 'imr_dualprompt':
+        from configs.imr_dualprompt import get_args_parser
+        config_parser = subparser.add_parser('imr_dualprompt', help='Split-ImageNet-R dual-prompt configs')
+    elif config == 'five_datasets_dualprompt':
+        from configs.five_datasets_dualprompt import get_args_parser
+        config_parser = subparser.add_parser('five_datasets_dualprompt', help='five datasets dual-prompt configs')
+    elif config == 'cub_dualprompt':
+        from configs.cub_dualprompt import get_args_parser
+        config_parser = subparser.add_parser('cub_dualprompt', help='Split-CUB dual-prompt configs')
+    elif config == 'cifar100_sprompt_5e':
+        from configs.cifar100_sprompt_5e import get_args_parser
+        config_parser = subparser.add_parser('cifar100_sprompt_5e', help='Split-CIFAR100 s-prompt configs')
+    elif config == 'imr_sprompt_5e':
+        from configs.imr_sprompt_5e import get_args_parser
+        config_parser = subparser.add_parser('imr_sprompt_5e', help='Split-ImageNet-R s-prompt configs')
+    elif config == 'five_datasets_sprompt_5e':
+        from configs.five_datasets_sprompt_5e import get_args_parser
+        config_parser = subparser.add_parser('five_datasets_sprompt_5e', help='five datasets s-prompt configs')
+    elif config == 'cub_sprompt_5e':
+        from configs.cub_sprompt_5e import get_args_parser
+        config_parser = subparser.add_parser('cub_sprompt_5e', help='Split-CUB s-prompt configs')
+    elif config == 'cifar100_l2p':
+        from configs.cifar100_l2p import get_args_parser
+        config_parser = subparser.add_parser('cifar100_l2p', help='Split-CIFAR100 l2p configs')
+    elif config == 'imr_l2p':
+        from configs.imr_l2p import get_args_parser
+        config_parser = subparser.add_parser('imr_l2p', help='Split-ImageNet-R l2p configs')
+    elif config == 'five_datasets_l2p':
+        from configs.five_datasets_l2p import get_args_parser
+        config_parser = subparser.add_parser('five_datasets_l2p', help='five datasets l2p configs')
+    elif config == 'cub_l2p':
+        from configs.cub_l2p import get_args_parser
+        config_parser = subparser.add_parser('cub_l2p', help='Split-CUB l2p configs')
     else:
         raise NotImplementedError
 
@@ -191,10 +247,14 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    args.config = config
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    if args.train_inference_task_only:
-        tii_trainer.train_inference_task(args)
+    if 'hide' in config:
+        if args.train_inference_task_only:
+            tii_trainer.train_inference_task(args)
+        else:
+            main(args)
     else:
         main(args)

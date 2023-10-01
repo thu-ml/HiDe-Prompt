@@ -14,8 +14,8 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 
 from datasets import build_continual_dataloader
-from mlp_engine import *
-import vision_transformer
+from engines.hide_tii_engine import *
+import vits.hide_vision_transformer as hide_vision_transformer
 import utils
 import warnings
 

@@ -16,14 +16,20 @@ Acknowledgments:
 for some einops/einsum fun
 * Simple transformer style inspired by Andrej Karpathy's https://github.com/karpathy/minGPT
 * Bert reference code checks against Huggingface Transformers and Tensorflow Bert
+
+Hacked together by / Copyright 2020, Ross Wightman
+# ------------------------------------------
+# Modification:
+# Added code for dualprompt implementation
+# -- Jaeho Lee, dlwogh9344@khu.ac.kr
+# ------------------------------------------
 """
 import math
 import logging
-from copy import deepcopy
 from functools import partial
 from collections import OrderedDict
 from typing import Optional
-
+from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,7 +41,7 @@ from timm.models.helpers import build_model_with_cfg, resolve_pretrained_cfg, na
 from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
 from timm.models.registry import register_model
 
-from prompt import EPrompt
+from prompts.dp_prompt import EPrompt
 from attention import PreT_Attention
 
 _logger = logging.getLogger(__name__)
@@ -318,57 +324,6 @@ class ParallelBlock(nn.Module):
             return self._forward(x)
 
 
-class MlpMapping(nn.Module):
-    def __init__(self, dim=384, hidden=None, drop=0.0, act_layer=nn.GELU, norm_layer=nn.LayerNorm, fc_with_norm=False):
-        super().__init__()
-        if hidden is None:
-            self.hidden = []
-        else:
-            self.hidden = hidden
-        assert isinstance(self.hidden, list)
-        layers = []
-        for i in range(len(self.hidden)+1):
-            if i == 0:
-                mlp = nn.Linear(dim, dim*self.hidden[0])
-                norm = norm_layer(dim*self.hidden[0])
-            elif i == len(self.hidden):
-                mlp = nn.Linear(dim*self.hidden[-1], dim)
-                norm = norm_layer(dim)
-            else:
-                mlp = nn.Linear(dim*self.hidden[i-1], dim*self.hidden[i])
-                norm = norm_layer(dim*self.hidden[i])
-            # for name, p in mlp.named_parameters():
-            #     if 'weights' in name:
-            #         dim = p.data.shape[0]
-            #         p.data.normal_(0.0, 1 / np.sqrt(dim))
-            #     if 'bias' in name:
-            #         p.data.fill_(0)
-            activation = act_layer()
-            dropout = nn.Dropout(drop)
-
-            if i == len(self.hidden) // 2 and i != len(self.hidden) and i != 0:
-                single_layer = [mlp, dropout, norm]
-            elif i == len(self.hidden):
-                single_layer = [mlp, dropout]
-            else:
-                single_layer = [mlp, activation, dropout]
-            layers.append(nn.Sequential(*single_layer))
-        if fc_with_norm:
-            self.norm = nn.Identity()
-        else:
-            self.norm = norm_layer(dim)
-        self.net = nn.ModuleList(layers)
-        print(layers)
-
-    def forward(self, x):
-        out = x
-        for layer in self.net:
-            out = layer(out)
-        out += x
-        out = self.norm(out)
-        return out
-
-
 class VisionTransformer(nn.Module):
     """ Vision Transformer
     A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`
@@ -384,8 +339,7 @@ class VisionTransformer(nn.Module):
             pool_size=None,
             top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
             use_g_prompt=False, g_prompt_length=None, g_prompt_layer_idx=None, use_prefix_tune_for_g_prompt=False,
-            use_e_prompt=False, e_prompt_layer_idx=None, use_prefix_tune_for_e_prompt=False, same_key_value=False,
-            mlp_structure=[]):
+            use_e_prompt=False, e_prompt_layer_idx=None, use_prefix_tune_for_e_prompt=False, same_key_value=False, ):
         """
         Args:
             img_size (int, tuple): input image size
@@ -483,6 +437,7 @@ class VisionTransformer(nn.Module):
         else:
             self.g_prompt = None
 
+
         if use_e_prompt and e_prompt_layer_idx is not None:
             self.e_prompt = EPrompt(length=prompt_length, embed_dim=embed_dim, embedding_key=embedding_key,
                                     prompt_init=prompt_init,
@@ -516,12 +471,6 @@ class VisionTransformer(nn.Module):
                 attn_layer=attn_layer)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim) if not use_fc_norm else nn.Identity()
-
-        # mlp
-        if mlp_structure:
-            self.mlp = MlpMapping(dim=embed_dim, hidden=mlp_structure, fc_with_norm=use_fc_norm)
-        else:
-            self.mlp = nn.Identity()
 
         # Classifier Head
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()
@@ -572,7 +521,7 @@ class VisionTransformer(nn.Module):
             self.global_pool = global_pool
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, task_id=-1, prompt_id=None, prompt_weight=None, train=False, prompt_momentum=0):
+    def forward_features(self, x, task_id=-1, cls_features=None, train=False, layer_feat=False):
         x = self.patch_embed(x)
 
         if self.cls_token is not None:
@@ -583,6 +532,7 @@ class VisionTransformer(nn.Module):
         if self.grad_checkpointing and not torch.jit.is_scripting():
             x = checkpoint_seq(self.blocks, x)
         else:
+            feats_l = []
             if self.use_g_prompt or self.use_e_prompt:
                 if self.use_prompt_mask and train:
                     start = task_id * self.e_prompt.top_k
@@ -591,14 +541,12 @@ class VisionTransformer(nn.Module):
                     prompt_mask = single_prompt_mask.unsqueeze(0).expand(x.shape[0], -1)
                     if end > self.e_prompt.pool_size:
                         prompt_mask = None
-                    if task_id == 0:
-                        prompt_momentum = 0
                 else:
                     prompt_mask = None
                 g_prompt_counter = -1
                 e_prompt_counter = -1
 
-                res = self.e_prompt(x, prompt_mask=prompt_mask, prompt_idx=prompt_id, prompt_weight=prompt_weight, prompt_momentum=prompt_momentum)
+                res = self.e_prompt(x, prompt_mask=prompt_mask, cls_features=cls_features)
                 e_prompt = res['batched_prompt']
 
                 for i, block in enumerate(self.blocks):
@@ -624,17 +572,42 @@ class VisionTransformer(nn.Module):
                             x = block(x)
                     else:
                         x = block(x)
+                    feats_l.append(x)
             else:
-                x = self.blocks(x)
-
+                for i, block in enumerate(self.blocks):
+                    x = block(x)
+                    feats_l.append(x)
                 res = dict()
+
+        if layer_feat:
+            return {'layer_feats': torch.stack(feats_l, dim=0)}
 
         x = self.norm(x)
         res['x'] = x
 
         return res
 
-    def forward_head(self, res, pre_logits: bool = False):
+    def forward_head(self, res, pre_logits: bool=False, layer_feat=False):
+        if layer_feat:
+            x = res['layer_feats']
+            print(x.shape)
+            if self.class_token and self.head_type == 'token':
+                if self.prompt_pool:
+                    x = x[:, :, self.total_prompt_len]
+                else:
+                    x = x[:, :, 0]
+            elif self.head_type == 'gap' and self.global_pool == 'avg':
+                x = x.mean(dim=2)
+            elif self.head_type == 'prompt' and self.prompt_pool:
+                x = x[:, :, 1:(1 + self.total_prompt_len)] if self.class_token else x[:, :, 0:self.total_prompt_len]
+                x = x.mean(dim=2)
+            elif self.head_type == 'token+prompt' and self.prompt_pool and self.class_token:
+                x = x[:, :, 0:self.total_prompt_len + 1]
+                x = x.mean(dim=2)
+            else:
+                raise ValueError(f'Invalid classifier={self.classifier}')
+            return {'layer_feats': x}
+
         x = res['x']
         if self.class_token and self.head_type == 'token':
             if self.prompt_pool:
@@ -642,7 +615,7 @@ class VisionTransformer(nn.Module):
             else:
                 x = x[:, 0]
         elif self.head_type == 'gap' and self.global_pool == 'avg':
-            x = x.mean(dim=1)
+            x = x[:, (1 + self.total_prompt_len):].mean(dim=1)
         elif self.head_type == 'prompt' and self.prompt_pool:
             x = x[:, 1:(1 + self.total_prompt_len)] if self.class_token else x[:, 0:self.total_prompt_len]
             x = x.mean(dim=1)
@@ -653,23 +626,24 @@ class VisionTransformer(nn.Module):
             raise ValueError(f'Invalid classifier={self.classifier}')
 
         res['pre_logits'] = x
-        res['features'] = x
 
-        x = self.mlp(x)
         x = self.fc_norm(x)
 
         res['logits'] = self.head(x)
 
         return res
 
-    def forward(self, x, task_id=-1, prompt_id=None, prompt_weight=None, train=False, fc_only=False, prompt_momentum=0):
+    def forward(self, x, task_id=-1, cls_features=None, train=False, layer_feat=False, fc_only=False):
         if fc_only:
             res = dict()
-            x = self.mlp(x)
             x = self.fc_norm(x)
             res['logits'] = self.head(x)
             return res
-        res = self.forward_features(x, task_id=task_id, prompt_id=prompt_id, prompt_weight=prompt_weight, train=train, prompt_momentum=prompt_momentum)
+        if layer_feat:
+            res = self.forward_features(x, task_id=task_id, cls_features=cls_features, train=True, layer_feat=layer_feat)
+            return self.forward_head(res, layer_feat=True)
+
+        res = self.forward_features(x, task_id=task_id, cls_features=cls_features, train=train)
         res = self.forward_head(res)
         return res
 
@@ -1335,6 +1309,7 @@ def vit_base_patch16_224_dino(pretrained=False, **kwargs):
     model = _create_vision_transformer('vit_base_patch16_224_in21k', pretrained=False, **model_kwargs)
     #del model.head
     state_dict = model.state_dict()
+    #ckpt = torch.load('/home/work/xiejingyi/SLCA_code/convs/dino_vitbase16_pretrain.pth', map_location='cpu')
     ckpt = torch.load('./checkpoints/dino_vitbase16_pretrain.pth', map_location='cpu')
     not_in_k = [k for k in ckpt.keys() if k not in state_dict.keys()]
     for k in not_in_k:
@@ -1354,6 +1329,7 @@ def vit_base_patch16_224_ibot(pretrained=False, **kwargs):
     model = _create_vision_transformer('vit_base_patch16_224_in21k', pretrained=False, **model_kwargs)
     #del model.head
     state_dict = model.state_dict()
+    #ckpt = torch.load('/home/work/xiejingyi/SLCA_code/convs/ibot_vitbase16_pretrain.pth', map_location='cpu')['state_dict']
     ckpt = torch.load('./checkpoints/ibot_vitbase16_pretrain.pth', map_location='cpu')['state_dict']
     not_in_k = [k for k in ckpt.keys() if k not in state_dict.keys()]
     for k in not_in_k:
@@ -1372,6 +1348,7 @@ def vit_base_patch16_224_21k_ibot(pretrained=False, **kwargs):
     model = _create_vision_transformer('vit_base_patch16_224_in21k', pretrained=False, **model_kwargs)
     # del model.head
     state_dict = model.state_dict()
+    #s_ckpt = torch.load('/home/work/xiejingyi/SLCA_code/convs/checkpoint.pth', map_location='cpu')['teacher']
     s_ckpt = torch.load('./checkpoints/checkpoint.pth', map_location='cpu')['teacher']
     ckpt = {}
     for key, val in s_ckpt.items():
@@ -1396,6 +1373,7 @@ def vit_base_patch16_224_mocov3(pretrained=False, **kwargs):
         patch_size=16, embed_dim=768, depth=12, num_heads=12, fc_norm=True, **kwargs)
     model = _create_vision_transformer('vit_base_patch16_224_in21k', pretrained=False, **model_kwargs)
     # del model.head
+    #ckpt = torch.load('/home/work/xiejingyi/SLCA_code/convs/mocov3-vit-base-300ep.pth', map_location='cpu')['model']
     ckpt = torch.load('./checkpoints/mocov3-vit-base-300ep.pth', map_location='cpu')['model']
     state_dict = model.state_dict()
     not_in_k = [k for k in ckpt.keys() if k not in state_dict.keys()]
@@ -1410,7 +1388,6 @@ def vit_base_patch16_224_mocov3(pretrained=False, **kwargs):
     #    model.adp_layer1 = deepcopy(model.patch_embed)
     return model
 
-
 @register_model
 def vit_base_patch16_224_mae(pretrained=False, adapter=False, **kwargs):
     """ ViT-Base model (ViT-B/16) from original paper (https://arxiv.org/abs/2010.11929).
@@ -1418,12 +1395,16 @@ def vit_base_patch16_224_mae(pretrained=False, adapter=False, **kwargs):
     NOTE: this model has valid 21k classifier head and no representation (pre-logits) layer
     """
     model_kwargs = dict(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12, with_adapter=adapter, Fl_pool=True, **kwargs)
+        patch_size=16, embed_dim=768, depth=12, num_heads=12, global_pool='avg', **kwargs)
     model = _create_vision_transformer('vit_base_patch16_224_in21k', pretrained=False, **model_kwargs)
-    del model.head
+    #del model.head
     last_block = deepcopy(model.blocks[-1])
     ckpt = torch.load('./checkpoints/mae_pretrain_vit_base.pth', map_location='cpu')['model']
     state_dict = model.state_dict()
+    not_in_k = [k for k in ckpt.keys() if k not in state_dict.keys()]
+    for k in not_in_k:
+        del ckpt[k]
+    #print(ckpt.keys())
     state_dict.update(ckpt)
     model.load_state_dict(state_dict)
     # model.load_state_dict(torch.load('mae_pretrain_vit_base.pth', map_location='cpu')['model'])
@@ -1434,6 +1415,7 @@ def vit_base_patch16_224_mae(pretrained=False, adapter=False, **kwargs):
     #    del model.adp_layer1
     #    model.adp_layer1 = deepcopy(model.patch_embed)
     return model
+
 
 @register_model
 def vit_small_patch16_224_ims(pretrained=False, **kwargs):

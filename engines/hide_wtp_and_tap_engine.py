@@ -334,7 +334,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
                                                   target_task_map=target_task_map,
                                                   acc_matrix=pre_ca_acc_matrix, args=args)
 
-            train_classifier_alignment(model, args, device, class_mask, task_id)
+            train_task_adaptive_prediction(model, args, device, class_mask, task_id)
 
         test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader,
                                        device=device,
@@ -415,7 +415,7 @@ def _compute_mean(model: torch.nn.Module, data_loader: Iterable, device: torch.d
             cls_cov[cls_id] = cluster_vars
 
 
-def train_classifier_alignment(model: torch.nn.Module, args, device, class_mask=None, task_id=-1):
+def train_task_adaptive_prediction(model: torch.nn.Module, args, device, class_mask=None, task_id=-1):
     model.train()
     run_epochs = args.crct_epochs
     crct_num = 0

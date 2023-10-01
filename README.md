@@ -45,7 +45,7 @@ Please download the self-supervised checkpoints and put them in the /checkpoints
 
 ## Usage
 To reproduce the results mentioned in our paper, execute the training script in /training_script/{train_{dataset}_{backbone}.sh}. e.g. 
-- if you want to train the continual learning model on CIFAR-100 with ViT-B-16 checkpoint as the backbone, you can execute the following command:
+- HiDe-Prompt: if you want to train the continual learning model on CIFAR-100 with the ViT-B-16 checkpoint used as the backbone, you can execute the following command:
 ```
 python -m torch.distributed.launch \
         --nproc_per_node=8 \
@@ -84,12 +84,54 @@ python -m torch.distributed.launch \
 	--output_dir ./output/cifar100_vit_pe_seed$seed
 
 ```
-
+- Dual-Prompt/S-Prompt/L2P: if you want to train the continual learning model on CIFAR-100 with the ViT-B-16 checkpoint used as the backbone, you can execute the following command:
+```
+python -m torch.distributed.launch \
+        --nproc_per_node=8 \
+        --master_port='29503' \
+        --use_env main.py \
+        cifar100_l2p \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path ./datasets \
+        --output_dir ./output \
+        --seed 42 \
+        --epochs 5 
+```
+```
+python -m torch.distributed.launch \
+        --nproc_per_node=8 \
+        --master_port='29503' \
+        --use_env main.py \
+        cifar100_sprompt_5e \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path ./datasets \
+        --output_dir ./output \
+        --seed 42 \
+        --epochs 40 
+```
+```
+python -m torch.distributed.launch \
+        --nproc_per_node=8 \
+        --master_port='29503' \
+        --use_env main.py \
+        cifar100_dualprompt \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path ./datasets \
+        --output_dir ./output \
+        --seed 42 \
+        --epochs 40 
+```
 
 If you encounter any issues or have any questions, please let us know. 
 
 ## Acknowledgement
-This repository is developed based on the PyTorch implementation of [Dual-Prompt](https://github.com/JH-LEE-KR/dualprompt-pytorch), many thanks.
+This repository is developed mainly based on the PyTorch implementation of [Dual-Prompt](https://github.com/JH-LEE-KR/dualprompt-pytorch). Many thanks to its contributors!
 
 ## **Citation**
 

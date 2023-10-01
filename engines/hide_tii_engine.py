@@ -244,7 +244,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
 
         # TODO classifier alignment
         if task_id > 0:
-            train_classifier_alignment(model, args, device, class_mask, task_id)
+            train_task_adaptive_prediction(model, args, device, class_mask, task_id)
 
         test_stats = evaluate_till_now(model=model, data_loader=data_loader,
                                        device=device,
@@ -277,7 +277,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
                 f.write(json.dumps(log_stats) + '\n')
 
 
-def train_classifier_alignment(model: torch.nn.Module, args, device, class_mask=None, task_id=-1):
+def train_task_adaptive_prediction(model: torch.nn.Module, args, device, class_mask=None, task_id=-1):
     model.train()
     run_epochs = args.crct_epochs
     crct_num = 0
