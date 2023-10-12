@@ -5,7 +5,7 @@
   </div>
 
   <div>
-      Liyuan Wang*&emsp; Jingyi Xie*&emsp; Xingxing Zhang&emsp; Mingyi Huang&emsp; Hang Su&emsp; Jun Zhu
+      Liyuan Wang&emsp; Jingyi Xie&emsp; Xingxing Zhang&emsp; Mingyi Huang&emsp; Hang Su&emsp; Jun Zhu
   </div>
   <br/>
 
