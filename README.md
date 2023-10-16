@@ -45,7 +45,7 @@ Please download the self-supervised checkpoints and put them in the /checkpoints
 
 ## Usage
 To reproduce the results mentioned in our paper, execute the training script in /training_script/{train_{dataset}_{backbone}.sh}. e.g. 
-- HiDe-Prompt: if you want to train the continual learning model on CIFAR-100 with the ViT-B-16 checkpoint used as the backbone, you can execute the following command:
+- **HiDe-Prompt**: if you want to train the continual learning model on CIFAR-100 with the ViT-B-16 checkpoint used as the backbone, you can execute the following command:
 ```
 python -m torch.distributed.launch \
         --nproc_per_node=8 \
@@ -84,7 +84,7 @@ python -m torch.distributed.launch \
 	--output_dir ./output/cifar100_vit_pe_seed$seed
 
 ```
-- Dual-Prompt/S-Prompt/L2P: if you want to train the continual learning model on CIFAR-100 with the ViT-B-16 checkpoint used as the backbone, you can execute the following command:
+- **Dual-Prompt/S-Prompt/L2P**: if you want to train the continual learning model on CIFAR-100 with the ViT-B-16 checkpoint used as the backbone, you can execute the following command:
 ```
 python -m torch.distributed.launch \
         --nproc_per_node=8 \
