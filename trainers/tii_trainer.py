@@ -15,28 +15,17 @@ from timm.optim import create_optimizer
 
 from datasets import build_continual_dataloader
 from engines.hide_tii_engine import *
-import vits.hide_vision_transformer as hide_vision_transformer
+import vits.hide_prompt_vision_transformer as hide_prompt_vision_transformer
 import utils
 import warnings
 
 warnings.filterwarnings('ignore', 'Argument interpolation should be of type InterpolationMode instead of int')
 
 
-def train_inference_task(args):
-    utils.init_distributed_mode(args)
-
+def train(args):
     device = torch.device(args.device)
 
-    # fix the seed for reproducibility
-    seed = args.seed
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-
-    cudnn.benchmark = True
-
     data_loader, data_loader_per_cls, class_mask, target_task_map = build_continual_dataloader(args)
-    print(f"debug: {target_task_map}")
 
     print(f"Creating original model: {args.original_model}")
     model = create_model(
@@ -56,8 +45,6 @@ def train_inference_task(args):
         for n, p in model.named_parameters():
             if n.startswith(tuple(args.freeze)):
                 p.requires_grad = False
-
-
     print(args)
 
     if args.eval:

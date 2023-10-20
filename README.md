@@ -127,6 +127,44 @@ python -m torch.distributed.launch \
         --seed 42 \
         --epochs 40 
 ```
+- **HiDe-LoRA**: if you want to train the continual learning model on CIFAR-100 with the ViT-B-16 checkpoint used as the backbone, you can execute the following command:
+```
+python -m torch.distributed.launch \
+        --nproc_per_node=8 \
+        --master_port='29510' \
+        --use_env main.py \
+        cifar100_continual_lora \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path /home/xiejingyi/data \
+        --output_dir ./output/cifar_vit_continual_lora_seed42 \
+        --seed 42 \
+        --epochs 20 \
+        --lr 0.01 \
+        --lora_type continual \
+        --num_tasks 10 \
+        --lora_rank 8
+
+python -m torch.distributed.launch \
+        --nproc_per_node=8 \
+        --master_port='29510' \
+        --use_env main.py \
+        cifar100_hidelora \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path /home/xiejingyi/data \
+        --output_dir ./output/cifar_vit_hidelora_seed42 \
+        --seed 42 \
+        --epochs 20 \
+        --lr 0.01 \
+        --lora_type hide \
+        --num_tasks 10 \
+        --trained_original_model ./output/cifar_vit_continual_lora_seed42 \
+        --lora_rank 8
+```
+
 
 If you encounter any issues or have any questions, please let us know. 
 

@@ -10,7 +10,7 @@ from continual_datasets.continual_datasets import *
 
 import utils
 import math
-
+from functools import partial
 
 class Lambda(transforms.Lambda):
     def __init__(self, lambd, nb_classes):
@@ -359,3 +359,136 @@ def build_cifar_transform(is_train, args):
     t.append(transforms.Normalize(mean=(0.5071, 0.4867, 0.4408), std=(0.2675, 0.2565, 0.2761)))
 
     return transforms.Compose(t)
+
+
+# This is used for few shot learning
+def split_multiple_dataset(datasets_info, args):
+    split_datasets = list()
+    target_dataset_map = dict()
+    target_task_map = dict()
+    task_dataset_map = dict()
+    mask = list()
+    last_index = 0 
+    num_tasks = 0
+    last_task = 0
+    for name, dataset in datasets_info.items():
+        args.nb_classes += dataset['num_classes']
+        num_tasks += dataset['num_tasks']
+        max_classes_per_task = math.ceil(dataset['num_classes'] / dataset['num_tasks'])
+        class_per_task = [max_classes_per_task for i in range(dataset['num_tasks'])]
+        class_per_task[-1] = dataset['num_classes'] % max_classes_per_task if dataset['num_classes'] % max_classes_per_task != 0 else class_per_task[-1]
+        labels = [i + last_index for i in range(dataset['num_classes'])]
+
+        if args.shuffle:
+            random.shuffle(labels)
+        
+        for i in range(dataset['num_tasks']):
+            train_split_indices = []
+            test_split_indices = []
+
+            scope = labels[:class_per_task[i]]
+            labels = labels[class_per_task[i]:]
+
+            mask.append(scope)
+
+            for k in range(len(dataset['train'].targets)):
+                if int(dataset['train'].targets[k]) + last_index in scope:
+                    train_split_indices.append(k)
+
+            for h in range(len(dataset['val'].targets)):
+                if int(dataset['val'].targets[h]) + last_index in scope:
+                    test_split_indices.append(h)
+
+            subset_train, subset_val = Subset(dataset['train'], train_split_indices), Subset(dataset['val'], test_split_indices)
+
+            split_datasets.append([subset_train, subset_val])
+            task_dataset_map[i + last_task] = name
+
+        
+        last_index += dataset['num_classes']
+        last_task += dataset['num_tasks']
+
+    print(mask)
+    tasks = [i for i in range(num_tasks)]
+    if args.shuffle:
+        random.shuffle(tasks)
+
+    shuffle_split_datasets = []
+    shuffle_mask = []
+    shuffle_task_dataset_map = dict()
+
+    for i, task_id in enumerate(tasks):
+        shuffle_split_datasets.append(split_datasets[task_id])
+        shuffle_mask.append(mask[task_id])
+        shuffle_task_dataset_map[i] = task_dataset_map[task_id]
+        for k in mask[task_id]:
+            target_task_map[k] = i
+            target_dataset_map[k] = task_dataset_map[task_id]
+
+    return shuffle_split_datasets, shuffle_mask, target_dataset_map, target_task_map, shuffle_task_dataset_map
+
+
+def build_upstream_continual_dataloader(args):
+    dataloader = list()
+    dataloader_per_cls = dict()
+    class_mask = list() if args.task_inc or args.train_mask else None
+    args.nb_classes = 0
+    args.num_datasets = len(args.datasets)
+    args.num_tasks = sum(args.tasks_per_dataset)
+    datasets_info = dict(dict())
+    last_classes_index = 0
+
+    for i, dataset in enumerate(args.datasets):
+        if 'cifar' in dataset.lower():
+            transform_train = build_cifar_transform(True, args)
+            transform_val = build_cifar_transform(False, args)
+        else:
+            transform_train = build_transform(True, args)
+            transform_val = build_transform(False, args)
+        dataset_train, dataset_val = get_dataset(dataset.replace('Split-', ''), transform_train, transform_val,
+                                                 args, target_transform=partial(target_transform, nb_classes=last_classes_index))
+        # dataset_train_mean, dataset_val_mean = get_dataset(dataset.replace('Split-', ''), transform_val,
+        #                                                    transform_val, args)
+
+        datasets_info[i] = dict()
+        datasets_info[i]['train'] = dataset_train
+        datasets_info[i]['val'] = dataset_val
+        datasets_info[i]['num_classes'] = len(args.continual_datasets_targets[i])
+        datasets_info[i]['num_tasks'] = args.tasks_per_dataset[i]
+        last_classes_index += datasets_info[i]['num_classes']
+
+    splited_dataset, class_mask, target_dataset_map, target_task_map, task_dataset_map = split_multiple_dataset(datasets_info, args)
+
+
+    for i in range(args.num_tasks):
+        
+        dataset_train, dataset_val = splited_dataset[i]
+
+        if args.distributed and utils.get_world_size() > 1:
+            num_replicas = utils.get_world_size()
+            global_rank = utils.get_rank()
+            sampler_train = torch.utils.data.DistributedSampler(
+                dataset_train, num_replicas=num_replicas, rank=global_rank, shuffle=True)
+
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        else:
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train, sampler=sampler_train,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+        )
+
+        data_loader_val = torch.utils.data.DataLoader(
+            dataset_val, sampler=sampler_val,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+        )
+
+        dataloader.append({'train': data_loader_train, 'val': data_loader_val})
+    
+    return dataloader, class_mask, target_dataset_map, target_task_map, task_dataset_map

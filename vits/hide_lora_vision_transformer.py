@@ -16,6 +16,13 @@ Acknowledgments:
 for some einops/einsum fun
 * Simple transformer style inspired by Andrej Karpathy's https://github.com/karpathy/minGPT
 * Bert reference code checks against Huggingface Transformers and Tensorflow Bert
+
+Hacked together by / Copyright 2020, Ross Wightman
+# ------------------------------------------
+# Modification:
+# Added code for continual learning with LoRA
+# -- Jingyi, jingyi_xie96@163.com
+# ------------------------------------------
 """
 import math
 import logging
@@ -32,13 +39,16 @@ import torch.utils.checkpoint
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from timm.models.helpers import build_model_with_cfg, resolve_pretrained_cfg, named_apply, adapt_input_conv, \
     checkpoint_seq
-from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
+from timm.models.layers import PatchEmbed, DropPath, trunc_normal_, lecun_normal_
 from timm.models.registry import register_model
-
-from prompts.hide_prompt import EPrompt
-from attention import PreT_Attention
+from peft.lora.continual_lora import ContinualLora
+from peft.lora.hide_lora import HideLoraPool
+from timm.models.layers.helpers import to_2tuple
 
 _logger = logging.getLogger(__name__)
+
+__all__ = ['vit_base_patch16_224_21k_ibot', 'vit_base_patch16_224_mae', 'vit_base_patch16_224_mocov3', 'vit_base_patch16_224_ibot', 'vit_base_patch16_224_dino',
+           'vit_base_patch16_224_in21k', '_create_vision_transformer', 'vit_base_patch16_224']
 
 
 def _cfg(url='', **kwargs):
@@ -186,6 +196,8 @@ default_cfgs = {
 }
 
 
+
+
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
@@ -199,9 +211,13 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, *args):
+    def forward(self, x, **kwargs):
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        if 'lora' in kwargs:
+            lora = kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'])['lora_value']
+            qkv = (self.qkv(x) + lora).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        else:
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)  # make torchscript happy (cannot use tensor as tuple)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -209,9 +225,97 @@ class Attention(nn.Module):
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
+        if 'lora' in kwargs:
+            x = self.proj(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='out')['lora_value']
+        else:
+            x = self.proj(x)
         x = self.proj_drop(x)
         return x
+    
+
+    def get_query(self, x, **kwargs):
+        if kwargs['position'] == 'qkv':
+            return x
+        if kwargs['position'] == 'out':
+            B, N, C = x.shape
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+            return x
+        else:
+            return None
+
+
+# class Attention(nn.Module):
+#     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
+#         super().__init__()
+#         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+#         self.num_heads = num_heads
+#         head_dim = dim // num_heads
+#         self.scale = head_dim ** -0.5
+
+#         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+#         self.attn_drop = nn.Dropout(attn_drop)
+#         self.proj = nn.Linear(dim, dim)
+#         self.proj_drop = nn.Dropout(proj_drop)
+
+#     def forward(self, x, *args):
+#         B, N, C = x.shape
+#         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+#         q, k, v = qkv.unbind(0)  # make torchscript happy (cannot use tensor as tuple)
+
+#         attn = (q @ k.transpose(-2, -1)) * self.scale
+#         attn = attn.softmax(dim=-1)
+#         attn = self.attn_drop(attn)
+
+#         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+#         x = self.proj(x)
+#         x = self.proj_drop(x)
+#         return x
+
+class Mlp(nn.Module):
+    """ MLP as used in Vision Transformer, MLP-Mixer and related networks
+    """
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, bias=True, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        bias = to_2tuple(bias)
+        drop_probs = to_2tuple(drop)
+
+        self.fc1 = nn.Linear(in_features, hidden_features, bias=bias[0])
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop_probs[0])
+        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias[1])
+        self.drop2 = nn.Dropout(drop_probs[1])
+
+    def forward(self, x, **kwargs):
+        if 'lora' in kwargs:
+            x = self.fc1(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='fc1')['lora_value']
+        else:
+            x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        if 'lora' in kwargs:
+            x = self.fc2(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='fc2')['lora_value']
+        else:
+            x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+    
+    def get_query(self, x, **kwargs):
+        if kwargs['position'] == 'fc1':
+            return x
+        if kwargs['position'] == 'fc2':
+            x = self.fc1(x)
+            x = self.act(x)
+            x = self.drop1(x)
+            return x
+        else:
+            return None
 
 
 class LayerScale(nn.Module):
@@ -241,10 +345,49 @@ class Block(nn.Module):
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-    def forward(self, x, prompt=None):
-        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), prompt)))
-        x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
+    def forward(self, x, **kwargs):
+        if 'lora' not in kwargs:
+            x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
+        else:
+            x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), **kwargs)))
+        if 'lora' not in kwargs:
+            x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
+        else:
+            x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x), **kwargs)))
         return x
+    
+    def get_query(self, x, **kwargs):
+        query = self.attn.get_query(self.norm1(x), **kwargs)
+        if query is not None:
+            return query
+        else:
+            x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
+            query = self.mlp.get_query(self.norm2(x), **kwargs)
+            return query
+
+
+# class Block(nn.Module):
+
+#     def __init__(
+#             self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., init_values=None,
+#             drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, attn_layer=Attention):
+#         super().__init__()
+#         self.norm1 = norm_layer(dim)
+#         self.attn = attn_layer(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+#         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+#         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+#         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+#         self.norm2 = norm_layer(dim)
+#         self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer, drop=drop)
+#         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+#         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+#     def forward(self, x, prompt=None):
+#         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), prompt)))
+#         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
+#         return x
+
 
 
 class ResPostBlock(nn.Module):
@@ -319,7 +462,7 @@ class ParallelBlock(nn.Module):
 
 
 class MlpMapping(nn.Module):
-    def __init__(self, dim=384, hidden=None, drop=0.0, act_layer=nn.GELU, norm_layer=nn.LayerNorm, fc_with_norm=False):
+    def __init__(self, dim=768, hidden=None, drop=0.0, act_layer=nn.GELU, norm_layer=nn.LayerNorm, fc_with_norm=False):
         super().__init__()
         if hidden is None:
             self.hidden = []
@@ -367,7 +510,7 @@ class MlpMapping(nn.Module):
         out += x
         out = self.norm(out)
         return out
-
+    
 
 class VisionTransformer(nn.Module):
     """ Vision Transformer
@@ -379,13 +522,9 @@ class VisionTransformer(nn.Module):
             self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, global_pool='token',
             embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, init_values=None,
             class_token=True, no_embed_class=False, fc_norm=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
-            weight_init='', embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block,
-            prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False,
-            pool_size=None,
-            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
-            use_g_prompt=False, g_prompt_length=None, g_prompt_layer_idx=None, use_prefix_tune_for_g_prompt=False,
-            use_e_prompt=False, e_prompt_layer_idx=None, use_prefix_tune_for_e_prompt=False, same_key_value=False,
-            mlp_structure=[]):
+            weight_init='', embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block, lora=False, lora_type='continual',
+            rank=4, lora_pool_size=10, attn=Attention, continual_lora=ContinualLora, hide_lora_pool = HideLoraPool, 
+            mlp_structure=[], lora_qkv=[False, False, True], lora_out=False, lora_fc1=False, lora_fc2=False, lora_position='qkv'):
         """
         Args:
             img_size (int, tuple): input image size
@@ -409,11 +548,11 @@ class VisionTransformer(nn.Module):
             norm_layer: (nn.Module): normalization layer
             act_layer: (nn.Module): MLP activation layer
             block_fn: (nn.Module): transformer block
-            prompt_pool (bool): use prompt pool or not
         """
         super().__init__()
         assert global_pool in ('', 'avg', 'token')
         assert class_token or global_pool != 'token'
+        assert lora_type in ('hide', 'continual')
         use_fc_norm = global_pool == 'avg' if fc_norm is None else fc_norm
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
@@ -436,78 +575,21 @@ class VisionTransformer(nn.Module):
         self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * .02)
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        self.prompt_pool = prompt_pool
-        self.head_type = head_type
-        self.use_prompt_mask = use_prompt_mask
-
-        self.use_g_prompt = use_g_prompt
-        self.g_prompt_layer_idx = g_prompt_layer_idx
-        # num_g_prompt : The actual number of layers to which g-prompt is attached.
-        # In official code, create as many layers as the total number of layers and select them based on the index
-        num_g_prompt = len(self.g_prompt_layer_idx) if self.g_prompt_layer_idx is not None else 0
-        self.use_prefix_tune_for_g_prompt = use_prefix_tune_for_g_prompt
-
-        self.use_e_prompt = use_e_prompt
-        self.e_prompt_layer_idx = e_prompt_layer_idx
-        num_e_prompt = len(self.e_prompt_layer_idx) if self.e_prompt_layer_idx is not None else 0
-        self.use_prefix_tune_for_e_prompt = use_prefix_tune_for_e_prompt
-
-        # if not self.use_prefix_tune_for_g_prompt and not self.use_g_prompt:
-        #     self.use_g_prompt = False
-        #     self.g_prompt_layer_idx = []
-
-        if use_g_prompt and g_prompt_length is not None and len(g_prompt_layer_idx) != 0:
-            if not use_prefix_tune_for_g_prompt:
-                g_prompt_shape = (num_g_prompt, g_prompt_length, embed_dim)
-                if prompt_init == 'zero':
-                    self.g_prompt = nn.Parameter(torch.zeros(g_prompt_shape))
-                elif prompt_init == 'uniform':
-                    self.g_prompt = nn.Parameter(torch.randn(g_prompt_shape))
-                    nn.init.uniform_(self.g_prompt, -1, 1)
-            else:
-                if same_key_value:
-                    g_prompt_shape = (num_g_prompt, 1, g_prompt_length, num_heads, embed_dim // num_heads)
-                    if prompt_init == 'zero':
-                        self.g_prompt = nn.Parameter(torch.zeros(g_prompt_shape))
-                    elif prompt_init == 'uniform':
-                        self.g_prompt = nn.Parameter(torch.randn(g_prompt_shape))
-                        nn.init.uniform_(self.g_prompt, -1, 1)
-                    self.g_prompt = self.g_prompt.repeat(1, 2, 1, 1, 1)
-                else:
-                    g_prompt_shape = (num_g_prompt, 2, g_prompt_length, num_heads, embed_dim // num_heads)
-                    if prompt_init == 'zero':
-                        self.g_prompt = nn.Parameter(torch.zeros(g_prompt_shape))
-                    elif prompt_init == 'uniform':
-                        self.g_prompt = nn.Parameter(torch.randn(g_prompt_shape))
-                        nn.init.uniform_(self.g_prompt, -1, 1)
+        attn_layer = attn
+        self.rank = rank
+        self.depth = depth
+        
+        self.lora = lora
+        self.lora_type = lora_type
+        self.lora_position = lora_position
+        if lora:
+            if lora_type == 'continual':
+                self.lora_layer = continual_lora(dim=embed_dim, rank=rank, depth=depth, lora_qkv=lora_qkv, lora_out=lora_out, lora_fc1=lora_fc1, lora_fc2=lora_fc2)  
+            if lora_type == 'hide':
+                self.lora_layer = hide_lora_pool(pool_size=lora_pool_size, dim=embed_dim, rank=rank, depth=depth, lora_qkv=lora_qkv, lora_out=lora_out, lora_fc1=lora_fc1, lora_fc2=lora_fc2)
         else:
-            self.g_prompt = None
-
-        if use_e_prompt and e_prompt_layer_idx is not None:
-            self.e_prompt = EPrompt(length=prompt_length, embed_dim=embed_dim, embedding_key=embedding_key,
-                                    prompt_init=prompt_init,
-                                    prompt_pool=prompt_pool, prompt_key=prompt_key, pool_size=pool_size, top_k=top_k,
-                                    batchwise_prompt=batchwise_prompt,
-                                    prompt_key_init=prompt_key_init, num_layers=num_e_prompt,
-                                    use_prefix_tune_for_e_prompt=use_prefix_tune_for_e_prompt,
-                                    num_heads=num_heads, same_key_value=same_key_value)
-
-        if not (use_g_prompt or use_e_prompt):
-            attn_layer = Attention
-        elif not (use_prefix_tune_for_g_prompt or use_prefix_tune_for_e_prompt):
-            # Prompt tunning
-            attn_layer = Attention
-        else:
-            # Prefix tunning
-            attn_layer = PreT_Attention
-
-        self.total_prompt_len = 0
-        if self.prompt_pool:
-            if not self.use_prefix_tune_for_g_prompt:
-                self.total_prompt_len += g_prompt_length * len(self.g_prompt_layer_idx)
-            if not self.use_prefix_tune_for_e_prompt:
-                self.total_prompt_len += prompt_length * top_k * len(self.e_prompt_layer_idx)
-
+            self.lora_layer = None
+        
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
             block_fn(
@@ -526,6 +608,7 @@ class VisionTransformer(nn.Module):
         # Classifier Head
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head_copy = {n: [] for n, p in self.head.named_parameters()}
 
         if weight_init != 'skip':
             self.init_weights(weight_init)
@@ -565,14 +648,11 @@ class VisionTransformer(nn.Module):
     def get_classifier(self):
         return self.head
 
-    def reset_classifier(self, num_classes: int, global_pool=None):
-        self.num_classes = num_classes
-        if global_pool is not None:
-            assert global_pool in ('', 'avg', 'token')
-            self.global_pool = global_pool
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+    def reset_classifier(self):
+        self.head = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, task_id=-1, prompt_id=None, prompt_weight=None, train=False, prompt_momentum=0):
+    def forward_features(self, x, task_id=-1, train=False, cls_features=None, lora_id=None):
+        res = dict()
         x = self.patch_embed(x)
 
         if self.cls_token is not None:
@@ -580,54 +660,34 @@ class VisionTransformer(nn.Module):
 
         x = self.pos_drop(x + self.pos_embed)
 
-        if self.grad_checkpointing and not torch.jit.is_scripting():
-            x = checkpoint_seq(self.blocks, x)
-        else:
-            if self.use_g_prompt or self.use_e_prompt:
-                if self.use_prompt_mask and train:
-                    start = task_id * self.e_prompt.top_k
-                    end = (task_id + 1) * self.e_prompt.top_k
-                    single_prompt_mask = torch.arange(start, end).to(x.device)
-                    prompt_mask = single_prompt_mask.unsqueeze(0).expand(x.shape[0], -1)
-                    if end > self.e_prompt.pool_size:
-                        prompt_mask = None
-                    if task_id == 0:
-                        prompt_momentum = 0
-                else:
-                    prompt_mask = None
-                g_prompt_counter = -1
-                e_prompt_counter = -1
-
-                res = self.e_prompt(x, prompt_mask=prompt_mask, prompt_idx=prompt_id, prompt_weight=prompt_weight, prompt_momentum=prompt_momentum)
-                e_prompt = res['batched_prompt']
-
-                for i, block in enumerate(self.blocks):
-                    if i in self.g_prompt_layer_idx:
-                        if self.use_prefix_tune_for_g_prompt:
-                            g_prompt_counter += 1
-                            # Prefix tunning, [B, 2, g_prompt_length, num_heads, embed_dim // num_heads]
-                            idx = torch.tensor([g_prompt_counter] * x.shape[0]).to(x.device)
-                            g_prompt = self.g_prompt[idx]
-                        else:
-                            g_prompt = None
-                        x = block(x, prompt=g_prompt)
-
-                    elif i in self.e_prompt_layer_idx:
-                        e_prompt_counter += 1
-                        if self.use_prefix_tune_for_e_prompt:
-                            # Prefix tunning, [B, 2, top_k * e_prompt_length, num_heads, embed_dim // num_heads]
-                            x = block(x, prompt=e_prompt[e_prompt_counter])
-                        else:
-                            # Pommpt tunning, [B, top_k * e_prompt_length, embed_dim]
-                            prompt = e_prompt[e_prompt_counter]
-                            x = torch.cat([prompt, x], dim=1)
-                            x = block(x)
-                    else:
-                        x = block(x)
+        if self.lora_layer is not None:
+            if isinstance(task_id, int):
+                task_mask = torch.tensor([task_id]).expand(x.shape[0])
             else:
-                x = self.blocks(x)
+                task_mask = task_id
 
-                res = dict()
+        for i in range(self.depth):
+            if self.lora_layer is not None:
+                if train:
+                    if self.grad_checkpointing and not torch.jit.is_scripting():
+                        x = checkpoint_seq(self.blocks[i], x, lora=self.lora_layer, task_id=task_id, depth_id=i, train=train)
+                    else:
+                        x = self.blocks[i](x, lora=self.lora_layer, task_id=task_id, depth_id=i, train=train)
+                else:
+                    if self.grad_checkpointing and not torch.jit.is_scripting():
+                        x = checkpoint_seq(self.blocks[i], x, lora=self.lora_layer, task_id=task_mask, depth_id=i, train=train)
+                    else:
+                        if self.lora_type == 'continual':
+                            x = self.blocks[i](x)
+                        else:
+                            x = self.blocks[i](x, lora=self.lora_layer, task_id=task_mask, depth_id=i, train=train)
+
+            else:
+                if self.grad_checkpointing and not torch.jit.is_scripting():
+                    x = checkpoint_seq(self.blocks[i], x)
+                else:
+                    x = self.blocks[i](x)
+        #x = self.blocks(x)
 
         x = self.norm(x)
         res['x'] = x
@@ -636,21 +696,12 @@ class VisionTransformer(nn.Module):
 
     def forward_head(self, res, pre_logits: bool = False):
         x = res['x']
-        if self.class_token and self.head_type == 'token':
-            if self.prompt_pool:
-                x = x[:, self.total_prompt_len]
-            else:
-                x = x[:, 0]
-        elif self.head_type == 'gap' and self.global_pool == 'avg':
-            x = x.mean(dim=1)
-        elif self.head_type == 'prompt' and self.prompt_pool:
-            x = x[:, 1:(1 + self.total_prompt_len)] if self.class_token else x[:, 0:self.total_prompt_len]
-            x = x.mean(dim=1)
-        elif self.head_type == 'token+prompt' and self.prompt_pool and self.class_token:
-            x = x[:, 0:self.total_prompt_len + 1]
+        if self.class_token and self.global_pool == 'token':
+            x = x[:, 0]
+        elif self.global_pool == 'avg':
             x = x.mean(dim=1)
         else:
-            raise ValueError(f'Invalid classifier={self.classifier}')
+            raise ValueError(f'Invalid global pool type={self.global_pool}')
 
         res['pre_logits'] = x
         res['features'] = x
@@ -662,17 +713,41 @@ class VisionTransformer(nn.Module):
 
         return res
 
-    def forward(self, x, task_id=-1, prompt_id=None, prompt_weight=None, train=False, fc_only=False, prompt_momentum=0):
+    def forward(self, x, task_id=-1, train=False, fc_only=False, cls_features=None):
         if fc_only:
             res = dict()
-            x = self.mlp(x)
             x = self.fc_norm(x)
             res['logits'] = self.head(x)
             return res
-        res = self.forward_features(x, task_id=task_id, prompt_id=prompt_id, prompt_weight=prompt_weight, train=train, prompt_momentum=prompt_momentum)
+        res = self.forward_features(x, task_id=task_id, train=train, cls_features=cls_features)
         res = self.forward_head(res)
         return res
+    
+    def update_attention(self, task_id, device=None):
+        for i in range(self.depth):
+            if self.lora_type == 'continual':
+                qkv, out, fc1, fc2 = self.lora_layer.cal_delta_w(depth=i, device=device)     
+                self.blocks[i].attn.qkv.weight.data += qkv.t()
+                self.blocks[i].attn.proj.weight.data += out.t()
+                self.blocks[i].mlp.fc1.weight.data += fc1.t()
+                self.blocks[i].mlp.fc2.weight.data += fc2.t()
 
+            if self.lora_type == 'hide':
+                qkv, out, fc1, fc2 = self.lora_layer.cal_delta_w(task_id=task_id, depth=i, device=device)     
+                self.blocks[i].attn.qkv.weight.data += qkv.t()
+                self.blocks[i].attn.proj.weight.data += out.t()
+                self.blocks[i].mlp.fc1.weight.data += fc1.t()
+                self.blocks[i].mlp.fc2.weight.data += fc2.t()
+
+    def after_task(self, task_id=-1, device=None):
+
+        if self.lora_type == 'hide':
+            self.lora_layer.after_task(task_id, device)
+        elif self.lora_type in ['continual']:
+            self.update_attention(task_id, device)
+            self.lora_layer.after_task(task_id)
+        else:
+            pass
 
 def init_weights_vit_timm(module: nn.Module, name: str = ''):
     """ ViT weight initialization, original timm impl (for reproducibility) """
@@ -1433,25 +1508,4 @@ def vit_base_patch16_224_mae(pretrained=False, adapter=False, **kwargs):
     # if adapter:
     #    del model.adp_layer1
     #    model.adp_layer1 = deepcopy(model.patch_embed)
-    return model
-
-@register_model
-def vit_small_patch16_224_ims(pretrained=False, **kwargs):
-    model_kwargs = dict(
-        patch_size=16, embed_dim=384, depth=12, num_heads=6, **kwargs)
-    model = _create_vision_transformer('vit_small_patch16_224_in21k', pretrained=False, **model_kwargs)
-    #del model.head
-    state_dict = model.state_dict()
-    ckpt = torch.load('./checkpoints/best_checkpoint.pth', map_location='cpu')['model']
-    ckpt_keys = ckpt.keys()
-    not_in_k = [k for k in ckpt.keys() if k not in state_dict.keys()]
-    head = [k for k in ckpt.keys() if 'head' in k]
-    for k in head:
-        del ckpt[k]
-    for k in not_in_k:
-        del ckpt[k]
-    state_dict.update(ckpt)
-    model.load_state_dict(state_dict)
-    # del model.norm
-    # model.norm = nn.LayerNorm(768)
     return model
