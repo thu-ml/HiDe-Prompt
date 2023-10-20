@@ -12,6 +12,8 @@ import utils
 import math
 from functools import partial
 
+__all__ = ['build_continual_dataloader', 'get_dataset', 'build_upstream_continual_dataloader', 'build_transform', 'build_cifar_transform']
+
 class Lambda(transforms.Lambda):
     def __init__(self, lambd, nb_classes):
         super().__init__(lambd)
@@ -153,7 +155,7 @@ def build_continual_dataloader(args):
     return dataloader, dataloader_per_cls, class_mask, target_task_map
 
 
-def get_dataset(dataset, transform_train, transform_val, args, ):
+def get_dataset(dataset, transform_train, transform_val, args, target_transform=None):
     if dataset == 'CIFAR100':
         dataset_train = datasets.CIFAR100(args.data_path, train=True, download=True, transform=transform_train)
         dataset_val = datasets.CIFAR100(args.data_path, train=False, download=True, transform=transform_val)
@@ -183,12 +185,12 @@ def get_dataset(dataset, transform_train, transform_val, args, ):
         dataset_val = Flowers102(args.data_path, split='test', download=True, transform=transform_val)
 
     elif dataset == 'Cars196':
-        dataset_train = StanfordCars(args.data_path, split='train', download=True, transform=transform_train)
-        dataset_val = StanfordCars(args.data_path, split='test', download=True, transform=transform_val)
+        dataset_train = StanfordCars(args.data_path, split='train', download=True, transform=transform_train, target_transform=target_transform).data
+        dataset_val = StanfordCars(args.data_path, split='test', download=True, transform=transform_val, target_transform=target_transform).data
 
     elif dataset == 'CUB200':
-        dataset_train = CUB200(args.data_path, train=True, download=True, transform=transform_train).data
-        dataset_val = CUB200(args.data_path, train=False, download=True, transform=transform_val).data
+        dataset_train = CUB200(args.data_path, train=True, download=True, transform=transform_train, target_transform=target_transform).data
+        dataset_val = CUB200(args.data_path, train=False, download=True, transform=transform_val, target_transform=target_transform).data
 
     elif dataset == 'Scene67':
         dataset_train = Scene67(args.data_path, train=True, download=True, transform=transform_train).data

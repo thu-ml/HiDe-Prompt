@@ -164,6 +164,74 @@ python -m torch.distributed.launch \
         --trained_original_model ./output/cifar_vit_continual_lora_seed42 \
         --lora_rank 8
 ```
+- **Few-Shot-LoRA**: if you want to test the few-shot learning ability of up-stream LoRA, you can use the following command:
+```
+python -m torch.distributed.launch \
+        --nproc_per_node=8 \
+        --master_port='29500' \
+        --use_env fsl.py \
+        imr_few_shot_lora \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path ./datasets \
+        --output_dir ./output/ \
+        --seed 42 \
+        --epochs 50 \
+        --lr 0.01 \
+        --lora_type hide \
+        --num_tasks 8 \
+        --fs_backbone vanilla \
+        --train_vanilla \
+        --vanilla_model_output_dir ./output/imr_vit_vanilla_model \
+        --shared_model_output_dir ./output/imr_vit_shared_model \
+        --lora_rank 8
+
+python -m torch.distributed.launch \
+        --nproc_per_node=8 \
+        --master_port='29500' \
+        --use_env fsl.py \
+        imr_few_shot_lora \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path ./datasets \
+        --output_dir ./output/ \
+        --seed 42 \
+        --epochs 50 \
+        --lr 0.01 \
+        --lora_type hide \
+        --num_tasks 8 \
+        --fs_backbone shared \
+        --train_shared \
+        --vanilla_model_output_dir ./output/imr_vit_vanilla_model \
+        --shared_model_output_dir ./output/imr_vit_shared_model \
+        --lora_rank 8
+
+python -m torch.distributed.launch \
+        --nproc_per_node=1 \
+        --master_port='29500' \
+        --use_env fsl.py \
+        imr_few_shot_lora \
+        --model vit_base_patch16_224 \
+        --original_model vit_base_patch16_224 \
+        --batch-size 24 \
+        --data-path ./datasets \
+        --output_dir ./output/ \
+        --seed 42 \
+        --epochs 50 \
+        --lr 0.01 \
+        --lora_type hide \
+        --num_tasks 8 \
+        --num_fs_epochs 50 \
+        --num_shots 5 \
+        --train_few_shot \
+        --fs_backbone shared \
+        --num_episodes 50 \
+        --vanilla_model_output_dir ./output/imr_vit_vanilla_model \
+        --shared_model_output_dir ./output/imr_vit_shared_model \
+        --lora_rank 8
+```
 
 
 If you encounter any issues or have any questions, please let us know. 
