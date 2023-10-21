@@ -11,7 +11,7 @@
 
 </div>
 
-The official implementation of HiDe-Prompt (NeurIPS 2023, Spotlight).
+The official implementation of HiDe-Prompt (NeurIPS 2023, Spotlight) and its generalized version.
 
 ![illustration_figure](hide_illustration.png)
 
