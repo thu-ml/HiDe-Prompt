@@ -98,11 +98,11 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
 
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loader,
-             device, task_id=-1, class_mask=None, target_task_map=None, args=None, ):
+             device, i=-1, task_id=-1, class_mask=None, target_task_map=None, args=None, ):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Test: [Task {}]'.format(task_id + 1)
+    header = 'Test: [Task {}]'.format(i + 1)
 
     # switch to evaluation mode
     model.eval()
@@ -139,7 +139,7 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
 
             if args.task_inc and class_mask is not None:
                 # adding mask to output logits
-                mask = class_mask[task_id]
+                mask = class_mask[i]
                 mask = torch.tensor(mask, dtype=torch.int64).to(device)
                 logits_mask = torch.ones_like(logits, device=device) * float('-inf')
                 logits_mask = logits_mask.index_fill(1, mask, 0.0)
@@ -173,7 +173,7 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
 
     for i in range(task_id + 1):
         test_stats = evaluate(model=model, original_model=original_model, data_loader=data_loader[i]['val'],
-                              device=device, task_id=i, class_mask=class_mask, target_task_map=target_task_map,
+                              device=device, i=i, task_id=task_id, class_mask=class_mask, target_task_map=target_task_map,
                               args=args)
 
         stat_matrix[0, i] = test_stats['Acc@1']
