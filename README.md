@@ -250,5 +250,12 @@ If you find this code helpful to your work, please cite our paper:
   journal={Advances in Neural Information Processing Systems},
   year={2023}
 }
+
+@article{wang2023towards,
+  title={Towards a General Framework for Continual Learning with Pre-training},
+  author={Wang, Liyuan and Xie, Jingyi and Zhang, Xingxing and Su, Hang and Zhu, Jun},
+  journal={arXiv preprint arXiv:2310.13888},
+  year={2023}
+}
 ```
 
