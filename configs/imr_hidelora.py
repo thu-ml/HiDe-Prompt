@@ -91,7 +91,7 @@ def get_args_parser(subparsers):
 
     subparsers.add_argument('--crct_epochs', default=30, type=int)
     subparsers.add_argument('--train_inference_task_only', action='store_true')
-    subparsers.add_argument('--original_model_mlp_structure', default=[], type=int)
+    subparsers.add_argument('--original_model_mlp_structure', default=[2], type=int)
     subparsers.add_argument('--ca_lr', default=0.005, type=float)
     subparsers.add_argument('--trained_original_model', default='', type=str)
     subparsers.add_argument('--reg', default=0.01, type=float)
