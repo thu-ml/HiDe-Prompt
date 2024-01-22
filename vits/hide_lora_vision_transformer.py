@@ -43,7 +43,9 @@ from timm.models.layers import PatchEmbed, DropPath, trunc_normal_, lecun_normal
 from timm.models.registry import register_model
 from peft.lora.continual_lora import ContinualLora
 from peft.lora.hide_lora import HideLoraPool
+from peft.lora.momentum_lora import MomentumLora
 from timm.models.layers.helpers import to_2tuple
+from vits.base import MlpHead
 
 _logger = logging.getLogger(__name__)
 
@@ -92,11 +94,11 @@ default_cfgs = {
         url='https://storage.googleapis.com/vit_models/augreg/'
             'B_32-i21k-300ep-lr_0.001-aug_light1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.03-res_384.npz',
         input_size=(3, 384, 384), crop_pct=1.0),
-    # 'vit_base_patch16_224': _cfg(
-    #     url='https://storage.googleapis.com/vit_models/augreg/'
-    #         'B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.01-res_224.npz'),
     'vit_base_patch16_224': _cfg(
-        url='https://storage.googleapis.com/vit_models/imagenet21k/ViT-B_16.npz'),
+        url='https://storage.googleapis.com/vit_models/augreg/'
+            'B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.01-res_224.npz'),
+    # 'vit_base_patch16_224': _cfg(
+    #     url='https://storage.googleapis.com/vit_models/imagenet21k/ViT-B_16.npz'),
     'vit_base_patch16_384': _cfg(
         url='https://storage.googleapis.com/vit_models/augreg/'
             'B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.01-res_384.npz',
@@ -196,8 +198,6 @@ default_cfgs = {
 }
 
 
-
-
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
@@ -214,7 +214,7 @@ class Attention(nn.Module):
     def forward(self, x, **kwargs):
         B, N, C = x.shape
         if 'lora' in kwargs:
-            lora = kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'])['lora_value']
+            lora = kwargs['lora'](x, depth_id=kwargs['depth_id'], task_id=kwargs['task_id'], train=kwargs['train'], old=kwargs['old'])['lora_value']
             qkv = (self.qkv(x) + lora).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         else:
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -225,28 +225,9 @@ class Attention(nn.Module):
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        if 'lora' in kwargs:
-            x = self.proj(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='out')['lora_value']
-        else:
-            x = self.proj(x)
+        x = self.proj(x)
         x = self.proj_drop(x)
         return x
-    
-
-    def get_query(self, x, **kwargs):
-        if kwargs['position'] == 'qkv':
-            return x
-        if kwargs['position'] == 'out':
-            B, N, C = x.shape
-            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv.unbind(0)
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-            return x
-        else:
-            return None
 
 
 # class Attention(nn.Module):
@@ -294,28 +275,17 @@ class Mlp(nn.Module):
 
     def forward(self, x, **kwargs):
         if 'lora' in kwargs:
-            x = self.fc1(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='fc1')['lora_value']
+            x = self.fc1(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='fc1', old=kwargs['old'])['lora_value']
         else:
             x = self.fc1(x)
         x = self.act(x)
         x = self.drop1(x)
         if 'lora' in kwargs:
-            x = self.fc2(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='fc2')['lora_value']
+            x = self.fc2(x) + kwargs['lora'](x, depth_id = kwargs['depth_id'], task_id = kwargs['task_id'], train=kwargs['train'], position='fc2', old=kwargs['old'])['lora_value']
         else:
             x = self.fc2(x)
         x = self.drop2(x)
         return x
-    
-    def get_query(self, x, **kwargs):
-        if kwargs['position'] == 'fc1':
-            return x
-        if kwargs['position'] == 'fc2':
-            x = self.fc1(x)
-            x = self.act(x)
-            x = self.drop1(x)
-            return x
-        else:
-            return None
 
 
 class LayerScale(nn.Module):
@@ -350,20 +320,8 @@ class Block(nn.Module):
             x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
         else:
             x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), **kwargs)))
-        if 'lora' not in kwargs:
-            x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        else:
-            x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x), **kwargs)))
+        x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
-    
-    def get_query(self, x, **kwargs):
-        query = self.attn.get_query(self.norm1(x), **kwargs)
-        if query is not None:
-            return query
-        else:
-            x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
-            query = self.mlp.get_query(self.norm2(x), **kwargs)
-            return query
 
 
 # class Block(nn.Module):
@@ -523,8 +481,8 @@ class VisionTransformer(nn.Module):
             embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, init_values=None,
             class_token=True, no_embed_class=False, fc_norm=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
             weight_init='', embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block, lora=False, lora_type='continual',
-            rank=4, lora_pool_size=10, attn=Attention, continual_lora=ContinualLora, hide_lora_pool = HideLoraPool, 
-            mlp_structure=[], lora_qkv=[False, False, True], lora_out=False, lora_fc1=False, lora_fc2=False, lora_position='qkv'):
+            rank=4, lora_pool_size=10, attn=Attention, continual_lora=ContinualLora, hide_lora_pool=HideLoraPool, momentum_lora=MomentumLora,
+            mlp_structure=[], lora_depth=5, use_mlp_head=False, mlp_output_dim=10):
         """
         Args:
             img_size (int, tuple): input image size
@@ -552,7 +510,7 @@ class VisionTransformer(nn.Module):
         super().__init__()
         assert global_pool in ('', 'avg', 'token')
         assert class_token or global_pool != 'token'
-        assert lora_type in ('hide', 'continual')
+        assert lora_type in ('hide', 'continual', 'momentum')
         use_fc_norm = global_pool == 'avg' if fc_norm is None else fc_norm
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
@@ -578,15 +536,17 @@ class VisionTransformer(nn.Module):
         attn_layer = attn
         self.rank = rank
         self.depth = depth
+        self.lora_depth = lora_depth
         
         self.lora = lora
         self.lora_type = lora_type
-        self.lora_position = lora_position
         if lora:
             if lora_type == 'continual':
-                self.lora_layer = continual_lora(dim=embed_dim, rank=rank, depth=depth, lora_qkv=lora_qkv, lora_out=lora_out, lora_fc1=lora_fc1, lora_fc2=lora_fc2)  
+                self.lora_layer = continual_lora(dim=embed_dim, rank=rank, depth=lora_depth)  
             if lora_type == 'hide':
-                self.lora_layer = hide_lora_pool(pool_size=lora_pool_size, dim=embed_dim, rank=rank, depth=depth, lora_qkv=lora_qkv, lora_out=lora_out, lora_fc1=lora_fc1, lora_fc2=lora_fc2)
+                self.lora_layer = hide_lora_pool(pool_size=lora_pool_size, dim=embed_dim, rank=rank, depth=lora_depth)
+            if lora_type == 'momentum':
+                self.lora_layer = momentum_lora(dim=embed_dim, rank=rank, depth=lora_depth)
         else:
             self.lora_layer = None
         
@@ -608,7 +568,8 @@ class VisionTransformer(nn.Module):
         # Classifier Head
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        self.head_copy = {n: [] for n, p in self.head.named_parameters()}
+        if use_mlp_head:
+            self.mlp_head = MlpHead(input_dim=self.embed_dim, output_dim=mlp_output_dim)
 
         if weight_init != 'skip':
             self.init_weights(weight_init)
@@ -651,7 +612,7 @@ class VisionTransformer(nn.Module):
     def reset_classifier(self):
         self.head = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, task_id=-1, train=False, cls_features=None, lora_id=None):
+    def forward_features(self, x, task_id=-1, train=False, cls_features=None, lora_id=None, old=False):
         res = dict()
         x = self.patch_embed(x)
 
@@ -667,20 +628,20 @@ class VisionTransformer(nn.Module):
                 task_mask = task_id
 
         for i in range(self.depth):
-            if self.lora_layer is not None:
+            if self.lora_layer is not None and i < self.lora_depth:
                 if train:
                     if self.grad_checkpointing and not torch.jit.is_scripting():
-                        x = checkpoint_seq(self.blocks[i], x, lora=self.lora_layer, task_id=task_id, depth_id=i, train=train)
+                        x = checkpoint_seq(self.blocks[i], x, lora=self.lora_layer, task_id=task_id, depth_id=i, train=train, old=old)
                     else:
-                        x = self.blocks[i](x, lora=self.lora_layer, task_id=task_id, depth_id=i, train=train)
+                        x = self.blocks[i](x, lora=self.lora_layer, task_id=task_id, depth_id=i, train=train, old=old)
                 else:
                     if self.grad_checkpointing and not torch.jit.is_scripting():
-                        x = checkpoint_seq(self.blocks[i], x, lora=self.lora_layer, task_id=task_mask, depth_id=i, train=train)
+                        x = checkpoint_seq(self.blocks[i], x, lora=self.lora_layer, task_id=task_mask, depth_id=i, train=train, old=old)
                     else:
-                        if self.lora_type == 'continual':
-                            x = self.blocks[i](x)
-                        else:
-                            x = self.blocks[i](x, lora=self.lora_layer, task_id=task_mask, depth_id=i, train=train)
+                        #if self.lora_type == 'continual':
+                        #    x = self.blocks[i](x)
+                        #else:
+                        x = self.blocks[i](x, lora=self.lora_layer, task_id=task_mask, depth_id=i, train=train, old=old)
 
             else:
                 if self.grad_checkpointing and not torch.jit.is_scripting():
@@ -694,7 +655,7 @@ class VisionTransformer(nn.Module):
 
         return res
 
-    def forward_head(self, res, pre_logits: bool = False):
+    def forward_head(self, res, pre_logits: bool = False, use_mlp_head=False):
         x = res['x']
         if self.class_token and self.global_pool == 'token':
             x = x[:, 0]
@@ -705,46 +666,48 @@ class VisionTransformer(nn.Module):
 
         res['pre_logits'] = x
         res['features'] = x
-
-        x = self.mlp(x)
-        x = self.fc_norm(x)
-
-        res['logits'] = self.head(x)
+        if use_mlp_head:
+            res['pre_logits'] = self.mlp_head.forward_features(x)
+            res['logits'] = self.mlp_head(x)
+        else:
+            x = self.mlp(x)
+            x = self.fc_norm(x)
+            res['logits'] = self.head(x)
 
         return res
 
-    def forward(self, x, task_id=-1, train=False, fc_only=False, cls_features=None):
+    def forward(self, x, task_id=-1, train=False, fc_only=False, cls_features=None, old=False, use_mlp_head=False, mlp_head_only=False):
         if fc_only:
-            res = dict()
-            x = self.fc_norm(x)
-            res['logits'] = self.head(x)
-            return res
-        res = self.forward_features(x, task_id=task_id, train=train, cls_features=cls_features)
-        res = self.forward_head(res)
+            if not use_mlp_head:
+                res = dict()
+                x = self.fc_norm(x)
+                res['logits'] = self.head(x)
+                return res
+            else:
+                if mlp_head_only:
+                    res['logits'] = self.mlp_head.forward_head(x)
+                else:
+                    res['logits'] = self.mlp_head(x)
+                return res
+        res = self.forward_features(x, task_id=task_id, train=train, cls_features=cls_features, old=old)
+        res = self.forward_head(res, use_mlp_head=use_mlp_head)
         return res
     
     def update_attention(self, task_id, device=None):
-        for i in range(self.depth):
+        for i in range(self.lora_depth):
             if self.lora_type == 'continual':
-                qkv, out, fc1, fc2 = self.lora_layer.cal_delta_w(depth=i, device=device)     
+                qkv= self.lora_layer.cal_delta_w(depth=i, device=device)     
                 self.blocks[i].attn.qkv.weight.data += qkv.t()
-                self.blocks[i].attn.proj.weight.data += out.t()
-                self.blocks[i].mlp.fc1.weight.data += fc1.t()
-                self.blocks[i].mlp.fc2.weight.data += fc2.t()
-
+                
             if self.lora_type == 'hide':
-                qkv, out, fc1, fc2 = self.lora_layer.cal_delta_w(task_id=task_id, depth=i, device=device)     
+                qkv = self.lora_layer.cal_delta_w(task_id=task_id, depth=i, device=device)     
                 self.blocks[i].attn.qkv.weight.data += qkv.t()
-                self.blocks[i].attn.proj.weight.data += out.t()
-                self.blocks[i].mlp.fc1.weight.data += fc1.t()
-                self.blocks[i].mlp.fc2.weight.data += fc2.t()
 
     def after_task(self, task_id=-1, device=None):
-
-        if self.lora_type == 'hide':
+        if self.lora_type in ['momentum', 'hide']:
             self.lora_layer.after_task(task_id, device)
         elif self.lora_type in ['continual']:
-            self.update_attention(task_id, device)
+            #self.update_attention(task_id, device)
             self.lora_layer.after_task(task_id)
         else:
             pass
@@ -1508,4 +1471,25 @@ def vit_base_patch16_224_mae(pretrained=False, adapter=False, **kwargs):
     # if adapter:
     #    del model.adp_layer1
     #    model.adp_layer1 = deepcopy(model.patch_embed)
+    return model
+
+@register_model
+def vit_small_patch16_224_ims(pretrained=False, **kwargs):
+    model_kwargs = dict(
+        patch_size=16, embed_dim=384, depth=12, num_heads=6, **kwargs)
+    model = _create_vision_transformer('vit_small_patch16_224_in21k', pretrained=False, **model_kwargs)
+    #del model.head
+    state_dict = model.state_dict()
+    ckpt = torch.load('./checkpoints/best_checkpoint.pth', map_location='cpu')['model']
+    ckpt_keys = ckpt.keys()
+    not_in_k = [k for k in ckpt.keys() if k not in state_dict.keys()]
+    head = [k for k in ckpt.keys() if 'head' in k]
+    for k in head:
+        del ckpt[k]
+    for k in not_in_k:
+        del ckpt[k]
+    state_dict.update(ckpt)
+    model.load_state_dict(state_dict)
+    # del model.norm
+    # model.norm = nn.LayerNorm(768)
     return model

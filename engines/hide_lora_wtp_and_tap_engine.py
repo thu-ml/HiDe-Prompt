@@ -16,6 +16,7 @@ from timm.scheduler import create_scheduler
 from torch import optim
 import utils
 from torch.distributions.multivariate_normal import MultivariateNormal
+import copy
 
 
 def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
@@ -49,6 +50,7 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
         loss = criterion(logits, target)  # base criterion (CrossEntropyLoss)
         # TODO add contrastive loss
         loss += orth_loss(output['pre_logits'], target, device, args)
+            
         acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
         if not math.isfinite(loss.item()):
@@ -100,14 +102,17 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
                             mask.extend(class_mask[id])
                         not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
                         not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
-                        logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
-                    lora_id = torch.max(logits, dim=1)[1]
-                    lora_id = torch.tensor([target_task_map[v.item()] for v in lora_id], device=device)
+                        old_logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
+                    
                 else:
                     raise NotImplementedError("original model is None")
 
+            lora_id = torch.max(old_logits, dim=1)[1]
+            # translate cls to task_id
+            lora_id = torch.tensor([target_task_map[v.item()] for v in lora_id], device=device)
             output = model(input, task_id=lora_id)
             logits = output['logits']
+            
 
             if args.task_inc and class_mask is not None:
                 # adding mask to output logits
@@ -120,6 +125,9 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
             loss = criterion(logits, target)
 
             acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+
+            lora_id = torch.max(old_logits, dim=1)[1]
+            lora_id = torch.tensor([target_task_map[v.item()] for v in lora_id], device=device)
             task_inference_acc = utils.task_inference_accuracy(lora_id.unsqueeze(-1), target, target_task_map)
 
             metric_logger.meters['Loss'].update(loss.item())
@@ -211,9 +219,28 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             else:
                 print('No checkpoint found at:', original_checkpoint_path)
                 return
-        # if model already trained
-        checkpoint_path = os.path.join(args.output_dir, 'checkpoint/task{}_checkpoint.pth'.format(task_id + 1))
-        
+       
+        if task_id > 0:
+            with torch.no_grad():
+                if args.distributed:
+                    model.module.lora_layer.k_lora_A.grad.zero_()
+                    model.module.lora_layer.k_lora_A[task_id] = model.module.lora_layer.k_lora_A[task_id-1]
+                    model.module.lora_layer.k_lora_B.grad.zero_()
+                    model.module.lora_layer.k_lora_B[task_id] = model.module.lora_layer.k_lora_B[task_id-1]
+                    model.module.lora_layer.v_lora_A.grad.zero_()
+                    model.module.lora_layer.v_lora_A[task_id] = model.module.lora_layer.v_lora_A[task_id-1]
+                    model.module.lora_layer.v_lora_B.grad.zero_()
+                    model.module.lora_layer.v_lora_B[task_id] = model.module.lora_layer.v_lora_B[task_id-1]
+                else:
+                    model.lora_layer.k_lora_A.grad.zero_()
+                    model.lora_layer.k_lora_A[task_id] = model.lora_layer.k_lora_A[task_id-1]
+                    model.lora_layer.k_lora_B.grad.zero_()
+                    model.lora_layer.k_lora_B[task_id] = model.lora_layer.k_lora_B[task_id-1]
+                    model.lora_layer.v_lora_A.grad.zero_()
+                    model.lora_layer.v_lora_A[task_id] = model.module.lora_layer.v_lora_A[task_id-1]
+                    model.lora_layer.v_lora_B.grad.zero_()
+                    model.lora_layer.v_lora_B[task_id] = model.module.lora_layer.v_lora_B[task_id-1]
+
         for epoch in range(args.epochs):
             train_stats = train_one_epoch(model=model, original_model=original_model, criterion=criterion,
                                             data_loader=data_loader[task_id]['train'], optimizer=optimizer,
@@ -224,6 +251,22 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             if lr_scheduler:
                 lr_scheduler.step(epoch)
         model_without_ddp.after_task(task_id=task_id, device=device)
+
+        if args.lora_momentum > 0 and task_id > 0:
+            with torch.no_grad():
+                model.module.lora_layer.k_lora_A[task_id].copy_(
+                    (1 - args.lora_momentum) * model.module.lora_layer.k_lora_A[task_id].detach().clone()
+                    + args.lora_momentum * model.module.lora_layer.k_lora_A[0:task_id].detach().clone().mean(dim=0))
+                model.module.lora_layer.k_lora_B[task_id].copy_(
+                    (1 - args.lora_momentum) * model.module.lora_layer.k_lora_B[task_id].detach().clone()
+                    + args.lora_momentum * model.module.lora_layer.k_lora_B[0:task_id].detach().clone().mean(dim=0))
+                model.module.lora_layer.v_lora_A[task_id].copy_(
+                    (1 - args.lora_momentum) * model.module.lora_layer.v_lora_A[task_id].detach().clone()
+                    + args.lora_momentum * model.module.lora_layer.v_lora_A[0:task_id].detach().clone().mean(dim=0))
+                model.module.lora_layer.v_lora_B[task_id].copy_(
+                    (1 - args.lora_momentum) * model.module.lora_layer.v_lora_B[task_id].detach().clone()
+                    + args.lora_momentum * model.module.lora_layer.v_lora_B[0:task_id].detach().clone().mean(dim=0))
+
 
         # compute mean and variance
         _compute_mean(model=model, data_loader=data_loader_per_cls, device=device, task_id=task_id,
@@ -237,12 +280,11 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
                                                   acc_matrix=pre_ca_acc_matrix, args=args)
 
             train_task_adaptive_prediction(model, args, device, class_mask, task_id)
-
+        
         test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader,
                                        device=device,
                                        task_id=task_id, class_mask=class_mask, target_task_map=target_task_map,
                                        acc_matrix=acc_matrix, args=args)
-
         if args.output_dir and utils.is_main_process():
             Path(os.path.join(args.output_dir, 'checkpoint')).mkdir(parents=True, exist_ok=True)
 
@@ -258,13 +300,13 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             utils.save_on_master(state_dict, checkpoint_path)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     }
+                    **{f'test_{k}': v for k, v in test_stats.items()},
+                    }
 
         if args.output_dir and utils.is_main_process():
             with open(os.path.join(args.output_dir,
-                                   '{}_stats.txt'.format(datetime.datetime.now().strftime('log_%Y_%m_%d_%H_%M'))),
-                      'a') as f:
+                                '{}_stats.txt'.format(datetime.datetime.now().strftime('log_%Y_%m_%d_%H_%M'))),
+                    'a') as f:
                 f.write(json.dumps(log_stats) + '\n')
 
 
@@ -321,7 +363,7 @@ def train_task_adaptive_prediction(model: torch.nn.Module, args, device, class_m
     model.train()
     run_epochs = args.crct_epochs
     crct_num = 0
-    param_list = [p for n, p in model.named_parameters() if p.requires_grad and 'prompt' not in n]
+    param_list = [p for n, p in model.named_parameters() if p.requires_grad and 'lora' not in n]
     network_params = [{'params': param_list, 'lr': args.ca_lr, 'weight_decay': args.weight_decay}]
     if 'mae' in args.model or 'beit' in args.model:
         optimizer = optim.AdamW(network_params, lr=args.ca_lr / 10, weight_decay=args.weight_decay)
