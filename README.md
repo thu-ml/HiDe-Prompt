@@ -244,18 +244,11 @@ This repository is developed mainly based on the PyTorch implementation of [Dual
 If you find this code helpful to your work, please cite our paper:
 
 ```bibtex
-@article{wang2023hide,
-  title={Hierarchical Decomposition of Prompt-Based Continual Learning: Rethinking Obscured Sub-optimality},
-  author={Wang, Liyuan and Xie, Jingyi and Zhang, Xingxing and Huang, Mingyi and Su, Hang and Zhu, Jun},
-  journal={Advances in Neural Information Processing Systems},
-  year={2023}
-}
-
-@article{wang2023towards,
-  title={Towards a General Framework for Continual Learning with Pre-training},
+@article{wang2024hide,
+  title={HiDe-PET: Continual Learning via Hierarchical Decomposition of Parameter-Efficient Tuning},
   author={Wang, Liyuan and Xie, Jingyi and Zhang, Xingxing and Su, Hang and Zhu, Jun},
-  journal={arXiv preprint arXiv:2310.13888},
-  year={2023}
+  journal={arXiv preprint arXiv:2407.05229},
+  year={2024}
 }
 ```
 
